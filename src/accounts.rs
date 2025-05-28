@@ -89,7 +89,23 @@ use ton_types::{
 pub struct StorageUsed {
     pub cells: VarUInteger7,
     pub bits: VarUInteger7,
+    #[cfg(not(feature = "ton"))]
     pub public_cells: VarUInteger7,
+    #[cfg(feature = "ton")]
+    pub extra: StorageExtra,
+}
+
+#[cfg(feature = "ton")]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Default)]
+pub enum StorageExtra {
+    #[default]
+    None,
+    Dict { dict_hash: ton_types::UInt256 },
+}
+
+#[cfg(feature = "ton")]
+impl StorageExtra {
+    pub const fn default() -> Self { Self::None }
 }
 
 impl StorageUsed {
@@ -98,18 +114,39 @@ impl StorageUsed {
         Self {
             cells: VarUInteger7::default(),
             bits: VarUInteger7::default(),
+            #[cfg(not(feature = "ton"))]
             public_cells: VarUInteger7::default(),
+            #[cfg(feature = "ton")]
+            extra: StorageExtra::default(),
         }
     }
     pub const fn bits(&self) -> u64 { self.bits.as_u64() }
     pub const fn cells(&self) -> u64 { self.cells.as_u64() }
+
+    #[cfg(not(feature = "ton"))]
     pub const fn public_cells(&self) -> u64 { self.public_cells.as_u64() }
 
-    pub fn with_values_checked(cells: u64, bits: u64, public_cells: u64) -> Result<Self> {
+    #[cfg(feature = "ton")]
+    pub const fn extra(&self) -> Option<&ton_types::UInt256> {
+        match &self.extra {
+            StorageExtra::None => None,
+            StorageExtra::Dict { dict_hash } => Some(dict_hash),
+        }
+    }
+
+    pub fn with_values_checked(
+        cells: u64,
+        bits: u64,
+        #[cfg(not(feature = "ton"))] public_cells: u64,
+        #[cfg(feature = "ton")] extra: StorageExtra
+    ) -> Result<Self> {
         Ok(Self {
             cells: VarUInteger7::new(cells)?,
             bits: VarUInteger7::new(bits)?,
+            #[cfg(not(feature = "ton"))]
             public_cells: VarUInteger7::new(public_cells)?,
+            #[cfg(feature = "ton")]
+            extra
         })
     }
 
@@ -135,7 +172,19 @@ impl Serializable for StorageUsed {
     fn write_to(&self, output: &mut BuilderData) -> Result<()> {
         self.cells.write_to(output)?; //cells:(VarUInteger 7)
         self.bits.write_to(output)?; //bits:(VarUInteger 7)
+        #[cfg(not(feature = "ton"))]
         self.public_cells.write_to(output)?; //public_cells:(VarUInteger 7)
+
+        #[cfg(feature = "ton")]
+        match self.extra {
+            StorageExtra::None =>  {
+                output.append_bits(0b000, 3)?;
+            },
+            StorageExtra::Dict { dict_hash } => {
+                output.append_bits(0b001, 3)?;
+                dict_hash.write_to(output)?;
+            }
+        }
         Ok(())
     }
 }
@@ -144,8 +193,33 @@ impl Deserializable for StorageUsed {
     fn read_from(&mut self, data: &mut SliceData) -> Result<()> {
         self.cells.read_from(data)?; //cells:(VarUInteger 7)
         self.bits.read_from(data)?; //bits:(VarUInteger 7)
+
+        #[cfg(not(feature = "ton"))]
         self.public_cells.read_from(data)?; //public_cells:(VarUInteger 7)
+
+        #[cfg(feature = "ton")]
+        match data.get_next_int(3)? {
+            0b000 => self.extra = StorageExtra::None,
+            0b001 => {
+                let mut dict_hash = UInt256::default();
+                dict_hash.read_from(data)?;
+                self.extra = StorageExtra::Dict { dict_hash }
+            }
+            tag => return Err(anyhow::anyhow!("wrong tag {tag:03b} deserializing StorageUsed")),
+        }
         Ok(())
+    }
+}
+
+#[cfg(feature = "ton")]
+impl fmt::Display for StorageExtra {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            StorageExtra::None => write!(f, "StorageExtra[empty]"),
+            StorageExtra::Dict { dict_hash } => {
+                write!(f, "StorageExtra[ dict_hash = {} ]", dict_hash)
+            }
+        }
     }
 }
 
@@ -153,9 +227,22 @@ impl fmt::Display for StorageUsed {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "StorageUsed[cells = {}, bits = {}, public_cells = {}]",
-            self.cells, self.bits, self.public_cells
-        )
+            "StorageUsed[cells = {}, bits = {}",
+            self.cells, self.bits,
+        )?;
+        #[cfg(not(feature = "ton"))]
+        write!(
+            f,
+            ", public_cells = {}]",
+            self.public_cells
+        )?;
+        #[cfg(feature = "ton")]
+        write!(
+            f,
+            ", extra = {}]",
+            self.extra
+        )?;
+        Ok(())
     }
 }
 
@@ -558,7 +645,14 @@ impl AccountStuff {
         let cell = self.storage.serialize()?;
         self.storage_stat.used.bits = VarUInteger7::new(cell.tree_bits_count())?;
         self.storage_stat.used.cells = VarUInteger7::new(cell.tree_cell_count())?;
-        self.storage_stat.used.public_cells = VarUInteger7::default();
+        #[cfg(feature = "ton")]
+        {
+            self.storage_stat.used.extra = StorageExtra::default();
+        }
+        #[cfg(not(feature = "ton"))]
+        {
+            self.storage_stat.used.public_cells = VarUInteger7::default();
+        }
         Ok(())
     }
 }
@@ -744,8 +838,15 @@ impl Account {
             ..AccountStorage::default()
         };
         let bits = storage.write_to_new_cell().unwrap().length_in_bits();
+
+        #[cfg(not(feature = "ton"))]
+        let used = StorageUsed::with_values_checked(1, bits as u64, 0).unwrap();
+
+        #[cfg(feature = "ton")]
+        let used = StorageUsed::with_values_checked(1, bits as u64, StorageExtra::default()).unwrap();
+
         let storage_stat = StorageInfo {
-            used: StorageUsed::with_values_checked(1, bits as u64, 0).unwrap(),
+            used,
             last_paid,
             due_payment: None,
         };
