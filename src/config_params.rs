@@ -384,6 +384,9 @@ pub enum GlobalCapabilities {
     CapSuspendedList          = 0x0000_8000_0000,
     #[cfg(feature = "venom")]
     CapFastFinality           = 0x0001_0000_0000,
+    CapSuspendByMarks         = 0x0002_0000_0000,
+    CapOmitMasterBlockHistory = 0x0004_0000_0000,
+    CapSignatureDomain        = 0x0008_0000_0000,
 }
 
 impl ConfigParams {
